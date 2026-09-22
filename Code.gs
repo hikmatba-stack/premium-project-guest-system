@@ -1,111 +1,127 @@
-/***** PREMIUM PROJECT — GOOGLE APPS SCRIPT BACKEND *****
- * Spreadsheet structure:
- *
- * Sheet 1: MASTER TAMU
- * A ID | B NAMA | C TAMU DARI | D KETERANGAN | E UNDANGAN
- *
- * Sheet 2: ABSENSI
- * A ID | B TIMESTAMP | C TANGGAL | D JAM | E AKSI | F NAMA |
- * G TAMU DARI | H KETERANGAN | I UNDANGAN | J SUMBER
- *
- * IMPORTANT:
- * 1) Put this script in the Google Sheet: Extensions > Apps Script.
- * 2) Change SPREADSHEET_ID only if script is not bound to the sheet.
- * 3) Deploy as Web app: Execute as Me, Who has access: Anyone.
- *******************************************************/
+/* =========================================================
+   PREMIUM PROJECT — GOOGLE APPS SCRIPT BRIDGE
+   Sheets:
+     MASTER TAMU : ID | NAMA | TAMU DARI | KETERANGAN
+     ABSENSI     : TIMESTAMP | ID | NAMA | TAMU DARI | KETERANGAN | AKSI | TANGGAL | JAM | SUMBER
+   ========================================================= */
 
-const SPREADSHEET_ID = ""; // Leave blank if this script is bound to the spreadsheet.
-const MASTER_SHEET = "MASTER TAMU";
-const LOG_SHEET = "ABSENSI";
+const SPREADSHEET_ID = ''; // Isi dengan Spreadsheet ID. Kosongkan bila script bound ke spreadsheet.
+const MASTER_SHEET = 'MASTER TAMU';
+const LOG_SHEET = 'ABSENSI';
 
-function getSpreadsheet_() {
+function ss_(){
   return SPREADSHEET_ID
     ? SpreadsheetApp.openById(SPREADSHEET_ID)
     : SpreadsheetApp.getActiveSpreadsheet();
 }
 
-function json_(obj) {
-  return ContentService
-    .createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
+function sh_(name){
+  const s = ss_().getSheetByName(name);
+  if(!s) throw new Error('Sheet tidak ditemukan: ' + name);
+  return s;
 }
 
-function doGet(e) {
-  const action = e && e.parameter ? e.parameter.action : "";
-  if (action === "guests") return json_({ ok: true, guests: readGuests_() });
-  if (action === "dashboard") return json_({ ok: true, dashboard: dashboard_() });
-  return json_({ ok: true, message: "Premium Project Guest API aktif." });
+function json_(obj){
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 
-function doPost(e) {
-  try {
-    const data = JSON.parse((e.postData && e.postData.contents) || "{}");
-    if (data.action === "CHECK IN" || data.action === "CHECK OUT") {
-      return json_(saveAttendance_(data));
-    }
-    if (data.action === "ADD_GUEST") {
-      return json_(addGuest_(data));
-    }
-    return json_({ ok: false, message: "Action tidak dikenal." });
-  } catch (err) {
-    return json_({ ok: false, message: err.message });
+function doGet(e){
+  try{
+    const action = (e && e.parameter && e.parameter.action) || 'guests';
+    if(action === 'guests') return json_({ok:true, guests:getGuests_(), stats:getStats_()});
+    if(action === 'ping') return json_({ok:true,message:'Premium Project API aktif',time:new Date().toISOString()});
+    return json_({ok:false,error:'Unknown action'});
+  }catch(err){
+    return json_({ok:false,error:String(err.message || err)});
   }
 }
 
-function readGuests_() {
-  const sh = getSpreadsheet_().getSheetByName(MASTER_SHEET);
-  if (!sh) throw new Error("Sheet MASTER TAMU tidak ditemukan.");
-  const values = sh.getDataRange().getValues();
-  if (values.length <= 1) return [];
-  return values.slice(1).filter(r => r[1]).map(r => ({
-    id: String(r[0] || ""),
-    name: String(r[1] || ""),
-    from: String(r[2] || ""),
-    type: String(r[3] || "REG").toUpperCase(),
-    invitation: Number(r[4] || 1),
-    status: "BELUM HADIR",
-    checkIn: "",
-    checkOut: ""
+function doPost(e){
+  try{
+    const data = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    const action = String(data.action || '').toUpperCase();
+    if(!['CHECK IN','CHECK OUT'].includes(action)) throw new Error('Action harus CHECK IN atau CHECK OUT.');
+    writeAttendance_(data, action);
+    return json_({ok:true,message:action+' tersimpan'});
+  }catch(err){
+    return json_({ok:false,error:String(err.message || err)});
+  }
+}
+
+function getGuests_(){
+  const sheet = sh_(MASTER_SHEET);
+  const values = sheet.getDataRange().getValues();
+  if(values.length < 2) return [];
+  const headers = values.shift().map(h=>String(h).trim().toUpperCase());
+  const idx = name => headers.indexOf(name);
+  const id = idx('ID'), nm = idx('NAMA'), fr = idx('TAMU DARI'), tp = idx('KETERANGAN');
+
+  const logs = getLogs_();
+  const latest = {};
+  logs.forEach(r=>{
+    latest[r.id] = latest[r.id] || {};
+    if(String(r.action).toUpperCase() === 'CHECK IN') latest[r.id].checkIn = r.time;
+    if(String(r.action).toUpperCase() === 'CHECK OUT') latest[r.id].checkOut = r.time;
+  });
+
+  return values.filter(row=>String(row[nm] || '').trim()).map(row=>{
+    const key = String(row[id] || '').trim();
+    return {
+      id:key,
+      name:String(row[nm] || '').trim(),
+      from:String(row[fr] || '').trim(),
+      type:String(row[tp] || 'REG').trim().toUpperCase(),
+      checkIn:latest[key]?.checkIn || '',
+      checkOut:latest[key]?.checkOut || ''
+    };
+  });
+}
+
+function getLogs_(){
+  const sheet = sh_(LOG_SHEET);
+  const values = sheet.getDataRange().getValues();
+  if(values.length < 2) return [];
+  const headers = values.shift().map(h=>String(h).trim().toUpperCase());
+  const idx = name => headers.indexOf(name);
+  const id=idx('ID'), action=idx('AKSI'), time=idx('JAM');
+  return values.map(r=>({
+    id:String(r[id] || ''),
+    action:String(r[action] || ''),
+    time:String(r[time] || '')
   }));
 }
 
-function saveAttendance_(d) {
-  const ss = getSpreadsheet_();
-  let sh = ss.getSheetByName(LOG_SHEET);
-  if (!sh) {
-    sh = ss.insertSheet(LOG_SHEET);
-    sh.appendRow(["ID","TIMESTAMP","TANGGAL","JAM","AKSI","NAMA","TAMU DARI","KETERANGAN","UNDANGAN","SUMBER"]);
-  }
-  const now = new Date();
-  const tz = ss.getSpreadsheetTimeZone() || "Asia/Jakarta";
-  const date = Utilities.formatDate(now, tz, "dd/MM/yyyy");
-  const time = Utilities.formatDate(now, tz, "HH:mm:ss");
-  sh.appendRow([
-    String(d.id || ""),
-    now,
+function getStats_(){
+  const guests = getGuests_();
+  const total = guests.length;
+  const attendance = guests.filter(g=>g.checkIn).length;
+  const venue = guests.filter(g=>g.checkIn && !g.checkOut).length;
+  const out = guests.filter(g=>g.checkOut).length;
+  return {total,checkIn:venue,venue,checkOut:out,attendance,rate:total?Math.round(attendance/total*100):0};
+}
+
+function writeAttendance_(data, action){
+  const sheet = sh_(LOG_SHEET);
+  const n = new Date();
+  const date = Utilities.formatDate(n, Session.getScriptTimeZone(), 'dd/MM/yyyy');
+  const time = Utilities.formatDate(n, Session.getScriptTimeZone(), 'HH:mm:ss');
+  sheet.appendRow([
+    n,
+    data.id || '',
+    data.name || '',
+    data.from || '',
+    data.type || 'REG',
+    action,
     date,
     time,
-    String(d.action || ""),
-    String(d.name || ""),
-    String(d.from || ""),
-    String(d.type || "REG").toUpperCase(),
-    Number(d.invitation || 1),
-    String(d.source || "DATABASE")
+    data.source || 'DATABASE'
   ]);
-  return { ok:true, message:"Absensi tersimpan.", date, time, id:String(d.id||"") };
 }
 
-function addGuest_(d) {
-  const ss = getSpreadsheet_();
-  const sh = ss.getSheetByName(MASTER_SHEET);
-  if (!sh) throw new Error("Sheet MASTER TAMU tidak ditemukan.");
-  const id = "M" + new Date().getTime();
-  sh.appendRow([id, String(d.name||""), String(d.from||""), String(d.type||"REG").toUpperCase(), Number(d.invitation||1)]);
-  return {ok:true,id};
-}
-
-function dashboard_() {
-  const guests = readGuests_();
-  const total = guests.reduce((a,g)=>a+g.invitation,0);
-  return {totalInv:total};
+function setupSheets(){
+  const ss = ss_();
+  let master = ss.getSheetByName(MASTER_SHEET) || ss.insertSheet(MASTER_SHEET);
+  let logs = ss.getSheetByName(LOG_SHEET) || ss.insertSheet(LOG_SHEET);
+  if(master.getLastRow() === 0) master.appendRow(['ID','NAMA','TAMU DARI','KETERANGAN']);
+  if(logs.getLastRow() === 0) logs.appendRow(['TIMESTAMP','ID','NAMA','TAMU DARI','KETERANGAN','AKSI','TANGGAL','JAM','SUMBER']);
 }
